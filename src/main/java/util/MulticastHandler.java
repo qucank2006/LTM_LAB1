@@ -4,6 +4,7 @@ import model.Message;
 
 import java.io.*;
 import java.net.*;
+import java.util.Collections;
 import java.util.Enumeration;
 import java.util.function.Consumer;
 
@@ -41,23 +42,68 @@ public class MulticastHandler {
             listenerThread.start();
             System.out.println("[Multicast] Đã tham gia nhóm UDP " + MULTICAST_IP + ":" + MULTICAST_PORT);
         } catch (Exception e) {
-            if (socket != null) socket.close();
-            throw new IllegalStateException("Không mở được Multicast UDP 8888.", e);
+            System.err.println("=== MULTICAST ERROR ===");
+            System.err.println("Message: " + e.getMessage());
+            e.printStackTrace();
+
+            if (socket != null) {
+                socket.close();
+                socket = null;
+            }
+
+            throw new IllegalStateException(
+                    "Không mở được Multicast UDP 8888.", e
+            );
         }
     }
 
-    private NetworkInterface findMulticastInterface() {
-        try {
-            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-            while (interfaces.hasMoreElements()) {
-                NetworkInterface ni = interfaces.nextElement();
-                if (ni.isUp() && ni.supportsMulticast() && !ni.isLoopback()) {
-                    return ni;
-                }
+    private NetworkInterface findMulticastInterface()
+            throws SocketException {
+
+        Enumeration<NetworkInterface> interfaces =
+                NetworkInterface.getNetworkInterfaces();
+
+        while (interfaces.hasMoreElements()) {
+            NetworkInterface ni = interfaces.nextElement();
+
+            if (!ni.isUp()
+                    || ni.isLoopback()
+                    || !ni.supportsMulticast()) {
+                continue;
             }
-        } catch (Exception ignored) {
+
+            boolean hasIPv4 = Collections.list(
+                    ni.getInetAddresses()
+            ).stream().anyMatch(
+                    address -> address instanceof Inet4Address
+                            && !address.isLoopbackAddress()
+                            && !address.isLinkLocalAddress()
+            );
+
+            if (!hasIPv4) {
+                continue;
+            }
+
+            String name = ni.getDisplayName().toLowerCase();
+
+            if (name.contains("vmware")
+                    || name.contains("virtual")
+                    || name.contains("hyper-v")
+                    || name.contains("wsl")) {
+                continue;
+            }
+
+            System.out.println(
+                    "[Multicast] Selected interface: "
+                            + ni.getDisplayName()
+            );
+
+            return ni;
         }
-        return null;
+
+        throw new SocketException(
+                "Không tìm thấy NetworkInterface IPv4 hỗ trợ Multicast"
+        );
     }
 
     private void listenLoop() {
