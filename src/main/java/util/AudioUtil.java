@@ -7,6 +7,7 @@ public class AudioUtil {
     private static TargetDataLine line;
     private static ByteArrayOutputStream audioStream;
     private static volatile boolean isRecording = false;
+    private static Thread recordThread;
 
     public static AudioFormat getAudioFormat() {
         // 16kHz, 16bit, Mono, Signed, LittleEndian
@@ -14,12 +15,12 @@ public class AudioUtil {
     }
 
     public static synchronized void startRecording() throws LineUnavailableException {
+        if (isRecording) return;
         AudioFormat format = getAudioFormat();
         DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
 
         if (!AudioSystem.isLineSupported(info)) {
-            System.err.println("[Audio] Micro không được hỗ trợ!");
-            return;
+            throw new LineUnavailableException("Micro không được hỗ trợ.");
         }
 
         line = (TargetDataLine) AudioSystem.getLine(info);
@@ -28,14 +29,16 @@ public class AudioUtil {
         isRecording = true;
         audioStream = new ByteArrayOutputStream();
 
-        Thread recordThread = new Thread(() -> {
+        TargetDataLine recordingLine = line;
+        ByteArrayOutputStream recordingStream = audioStream;
+        recordThread = new Thread(() -> {
             byte[] buffer = new byte[1024];
-            while (isRecording) {
-                int count = line.read(buffer, 0, buffer.length);
-                if (count > 0) {
-                    audioStream.write(buffer, 0, count);
+            try {
+                while (isRecording && recordingLine.isOpen()) {
+                    int count = recordingLine.read(buffer, 0, buffer.length);
+                    if (count > 0) recordingStream.write(buffer, 0, count);
                 }
-            }
+            } catch (RuntimeException ignored) { /* Device closed or removed. */ }
         });
         recordThread.setDaemon(true);
         recordThread.start();
@@ -43,7 +46,7 @@ public class AudioUtil {
 
     public static synchronized byte[] stopRecording() {
         if (!isRecording) {
-            return generateSampleTone();
+            return new byte[0];
         }
         isRecording = false;
         if (line != null) {
@@ -51,10 +54,17 @@ public class AudioUtil {
             line.close();
         }
 
+        if (recordThread != null) {
+            try {
+                recordThread.join(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         try {
             byte[] rawPcm = audioStream.toByteArray();
             if (rawPcm.length == 0) {
-                return generateSampleTone();
+                return new byte[0];
             }
             // Đóng gói thành chuẩn file WAV
             AudioFormat format = getAudioFormat();
@@ -65,7 +75,7 @@ public class AudioUtil {
             return wavOut.toByteArray();
         } catch (Exception e) {
             System.err.println("[Audio] Lỗi chuyển đổi WAV: " + e.getMessage());
-            return generateSampleTone();
+            return new byte[0];
         }
     }
 
@@ -73,11 +83,15 @@ public class AudioUtil {
         if (wavBytes == null || wavBytes.length == 0) return;
         new Thread(() -> {
             try {
-                ByteArrayInputStream bais = new ByteArrayInputStream(wavBytes);
-                AudioInputStream ais = AudioSystem.getAudioInputStream(bais);
-                Clip clip = AudioSystem.getClip();
-                clip.open(ais);
-                clip.start();
+                try (ByteArrayInputStream bais = new ByteArrayInputStream(wavBytes);
+                     AudioInputStream ais = AudioSystem.getAudioInputStream(bais)) {
+                    Clip clip = AudioSystem.getClip();
+                    clip.addLineListener(event -> {
+                        if (event.getType() == LineEvent.Type.STOP) clip.close();
+                    });
+                    clip.open(ais);
+                    clip.start();
+                }
             } catch (Exception e) {
                 System.err.println("[Audio] Lỗi phát âm thanh: " + e.getMessage());
             }

@@ -1,39 +1,69 @@
-target/
-!.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
-.kotlin
 
-### IntelliJ IDEA ###
-.idea/modules.xml
-.idea/jarRepositories.xml
-.idea/compiler.xml
-.idea/libraries/
-*.iws
+# ==============================
+# IntelliJ IDEA
+# ==============================
+.idea/
 *.iml
+*.iws
 *.ipr
 
-### Eclipse ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
-
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
+# ==============================
+# Java / Maven
+# ==============================
+target/
 build/
-!**/src/main/**/build/
-!**/src/test/**/build/
+out/
+*.class
+*.log
 
-### VS Code ###
-.vscode/
+# ==============================
+# Files used for testing transfers
+# ==============================
+downloads/
+uploads/
+received/
+received_files/
+shared_files/
+temp/
+tmp/
+test_files/
+transfer_files/
 
-### Mac OS ###
+# ==============================
+# Media files used for testing
+# ==============================
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.mp3
+*.wav
+*.zip
+*.rar
+*.7z
+
+# ==============================
+# Temporary files
+# ==============================
+*.tmp
+*.bak
+*.swp
+*.part
+*.crdownload
+*~
+
+# ==============================
+# Local configuration and secrets
+# ==============================
+.env
+.env.*
+!.env.example
+application-local.properties
+app-local.properties
+
+# ==============================
+# Operating system
+# ==============================
 .DS_Store
+Thumbs.db
+desktop.ini

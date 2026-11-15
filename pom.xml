@@ -22,7 +22,7 @@
 
     <description>
         P2P Chat and File Sharing Application
-        using Java, JavaFX and TCP Socket
+        using Java Swing, TCP/UDP Socket
     </description>
 
 
@@ -34,11 +34,9 @@
 
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.source>21</maven.compiler.source>
 
-        <maven.compiler.target>17</maven.compiler.target>
-
-        <javafx.version>21.0.5</javafx.version>
+        <maven.compiler.target>21</maven.compiler.target>
 
     </properties>
 
@@ -48,27 +46,7 @@
          ========================= -->
 
     <dependencies>
-
-        <!-- JavaFX Controls
-             Button, Label, TextField,
-             ListView, ScrollPane, etc. -->
-        <dependency>
-
-            <groupId>org.openjfx</groupId>
-
-            <artifactId>javafx-controls</artifactId>
-
-            <version>${javafx.version}</version>
-
-        </dependency>
-
-
-        <!-- JavaFX FXML -->
-        <dependency>
-            <groupId>org.openjfx</groupId>
-            <artifactId>javafx-fxml</artifactId>
-            <version>${javafx.version}</version>
-        </dependency>
+        <dependency><groupId>com.formdev</groupId><artifactId>flatlaf</artifactId><version>3.5.4</version></dependency>
 
         <!-- MySQL Connector -->
         <dependency>
@@ -101,34 +79,11 @@
 
                 <configuration>
 
-                    <source>17</source>
+                    <source>21</source>
 
-                    <target>17</target>
+                    <target>21</target>
 
                     <encoding>UTF-8</encoding>
-
-                </configuration>
-
-            </plugin>
-
-
-            <!-- =========================
-                 JAVAFX MAVEN PLUGIN
-                 ========================= -->
-
-            <plugin>
-
-                <groupId>org.openjfx</groupId>
-
-                <artifactId>javafx-maven-plugin</artifactId>
-
-                <version>0.0.8</version>
-
-                <configuration>
-
-                    <!-- Main JavaFX class -->
-
-                    <mainClass>client.Main</mainClass>
 
                 </configuration>
 

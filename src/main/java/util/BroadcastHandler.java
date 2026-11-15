@@ -16,7 +16,8 @@ public class BroadcastHandler {
         this.messageConsumer = messageConsumer;
     }
 
-    public void start() {
+    public synchronized void start() {
+        if (running) return;
         try {
             socket = new DatagramSocket(BROADCAST_PORT);
             socket.setBroadcast(true);
@@ -28,7 +29,8 @@ public class BroadcastHandler {
             listenerThread.start();
             System.out.println("[Broadcast] Đang lắng nghe UDP Broadcast trên cổng " + BROADCAST_PORT);
         } catch (Exception e) {
-            System.err.println("[Broadcast] Lỗi mở cổng " + BROADCAST_PORT + ": " + e.getMessage());
+            if (socket != null) socket.close();
+            throw new IllegalStateException("Không mở được Broadcast UDP 9999.", e);
         }
     }
 
@@ -64,6 +66,8 @@ public class BroadcastHandler {
             oos.writeObject(message);
             oos.flush();
             byte[] data = baos.toByteArray();
+            if (data.length > 65507)
+                throw new IllegalArgumentException("Dữ liệu vượt giới hạn một gói UDP (65.507 byte). Hãy dùng TCP hoặc P2P.");
 
             DatagramPacket packet = new DatagramPacket(
                     data,
@@ -71,16 +75,16 @@ public class BroadcastHandler {
                     InetAddress.getByName("255.255.255.255"),
                     BROADCAST_PORT
             );
-            DatagramSocket sendSocket = new DatagramSocket();
-            sendSocket.setBroadcast(true);
-            sendSocket.send(packet);
-            sendSocket.close();
+            try (DatagramSocket sendSocket = new DatagramSocket()) {
+                sendSocket.setBroadcast(true);
+                sendSocket.send(packet);
+            }
         } catch (Exception e) {
-            System.err.println("[Broadcast] Lỗi gửi: " + e.getMessage());
+            throw new IllegalStateException("Không gửi được Broadcast: " + e.getMessage(), e);
         }
     }
 
-    public void stop() {
+    public synchronized void stop() {
         running = false;
         if (socket != null && !socket.isClosed()) {
             socket.close();

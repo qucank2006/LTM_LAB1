@@ -21,7 +21,8 @@ public class MulticastHandler {
         this.messageConsumer = messageConsumer;
     }
 
-    public void start() {
+    public synchronized void start() {
+        if (running) return;
         try {
             socket = new MulticastSocket(MULTICAST_PORT);
             groupAddress = new InetSocketAddress(InetAddress.getByName(MULTICAST_IP), MULTICAST_PORT);
@@ -40,7 +41,8 @@ public class MulticastHandler {
             listenerThread.start();
             System.out.println("[Multicast] Đã tham gia nhóm UDP " + MULTICAST_IP + ":" + MULTICAST_PORT);
         } catch (Exception e) {
-            System.err.println("[Multicast] Lỗi khởi tạo: " + e.getMessage());
+            if (socket != null) socket.close();
+            throw new IllegalStateException("Không mở được Multicast UDP 8888.", e);
         }
     }
 
@@ -53,7 +55,8 @@ public class MulticastHandler {
                     return ni;
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
         return null;
     }
 
@@ -89,6 +92,8 @@ public class MulticastHandler {
             oos.writeObject(message);
             oos.flush();
             byte[] data = baos.toByteArray();
+            if (data.length > 65507)
+                throw new IllegalArgumentException("Dữ liệu vượt giới hạn một gói UDP (65.507 byte). Hãy dùng TCP hoặc P2P.");
 
             DatagramPacket packet = new DatagramPacket(
                     data,
@@ -96,15 +101,15 @@ public class MulticastHandler {
                     InetAddress.getByName(MULTICAST_IP),
                     MULTICAST_PORT
             );
-            DatagramSocket sendSocket = new DatagramSocket();
-            sendSocket.send(packet);
-            sendSocket.close();
+            try (DatagramSocket sendSocket = new DatagramSocket()) {
+                sendSocket.send(packet);
+            }
         } catch (Exception e) {
-            System.err.println("[Multicast] Lỗi gửi tin: " + e.getMessage());
+            throw new IllegalStateException("Không gửi được Multicast: " + e.getMessage(), e);
         }
     }
 
-    public void stop() {
+    public synchronized void stop() {
         running = false;
         if (socket != null && !socket.isClosed()) {
             try {
@@ -112,7 +117,10 @@ public class MulticastHandler {
                     socket.leaveGroup(groupAddress, networkInterface);
                 }
                 socket.close();
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            } finally {
+                socket.close();
+            }
         }
     }
 }

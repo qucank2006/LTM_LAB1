@@ -7,7 +7,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
 
-/** Shared configuration loaded once at startup from an external UTF-8 file. */
+/**
+ * Shared configuration loaded once at startup from an external UTF-8 file.
+ */
 public final class AppConfig {
     private static final Path CONFIG_PATH = Path.of(
             System.getProperty("chat.config", "app.properties")).toAbsolutePath();
@@ -32,6 +34,10 @@ public final class AppConfig {
             throw new IllegalStateException("Missing configuration '" + key + "' in " + CONFIG_PATH);
         }
         return value.trim();
+    }
+
+    public static String serverBind() {
+        return required("server.bind");
     }
 
     public static String serverHost() {

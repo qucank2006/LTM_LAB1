@@ -1,6 +1,7 @@
 package model;
 
 public enum MessageType {
+    PING, PONG, REGISTER, AUTH_RESPONSE, LOGOUT, ERROR,
     LOGIN,              // Báo danh khi Client mới bật lên
     TEXT_MESSAGE,       // Gửi tin nhắn chat bình thường
     GET_USER_LIST,      // Client xin danh sách user đang online

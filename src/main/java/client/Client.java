@@ -21,105 +21,7 @@ public class Client {
     private static String pendingFilePath = "";
 
     public static void main(String[] args) {
-        Scanner scanner = new Scanner(System.in);
-
-        System.out.print("Nhập tên đăng nhập của bạn: ");
-        myUsername = scanner.nextLine();
-
-        // Giả lập một Port ngẫu nhiên từ 9000-9999 để làm Port nhận file P2P
-        int myPeerPort = 9000 + (int)(Math.random() * 1000);
-
-        // [QUAN TRỌNG] Khởi động Server ngầm để sẵn sàng nhận file từ máy khác
-        startPeerServer(myPeerPort);
-
-        try {
-            // 1. KẾT NỐI ĐẾN SERVER TRUNG TÂM
-            Socket socket = new Socket(SERVER_IP, SERVER_PORT);
-            socket.setKeepAlive(true);
-            socket.setTcpNoDelay(true);
-            System.out.println("-> Đã kết nối đến Server thành công!");
-
-            out = new ObjectOutputStream(socket.getOutputStream());
-            out.flush();
-            in = new ObjectInputStream(socket.getInputStream());
-
-            // 2. GỬI GÓI TIN ĐĂNG NHẬP
-            User myUser = new User(myUsername, socket.getLocalAddress().getHostAddress(), myPeerPort);
-            Message loginMsg = new Message(MessageType.LOGIN, myUsername, "Server");
-            loginMsg.setPayload(myUser);
-            out.writeObject(loginMsg);
-            out.flush();
-
-            // 3. MỞ LUỒNG (THREAD) LẮNG NGHE TIN NHẮN TỪ SERVER
-            Thread heartbeatThread = new Thread(() -> {
-                try {
-                    while (!socket.isClosed()) {
-                        Thread.sleep(15000);
-                        synchronized (out) {
-                            Message ping = new Message(MessageType.TEXT_MESSAGE, myUsername, myUsername, "__PING__");
-                            out.writeObject(ping);
-                            out.flush();
-                            out.reset();
-                        }
-                    }
-                } catch (Exception ignored) {}
-            });
-            heartbeatThread.setDaemon(true);
-            heartbeatThread.start();
-
-            // 4. LUỒNG CHÍNH: XỬ LÝ NHẬP PHÍM
-            System.out.println("=====================================================");
-            System.out.println("Cú pháp chat: @TênNgườiNhận Nội_dung_tin_nhắn");
-            System.out.println("Cú pháp file: #FILE @TênNgườiNhận Đường_dẫn_file");
-            System.out.println("Ví dụ gửi file: #FILE @Bob C:\\tailieu.pdf");
-            System.out.println("=====================================================");
-
-            while (true) {
-                String input = scanner.nextLine();
-
-                if (input.trim().isEmpty()) continue;
-
-                // Cú pháp truyền file P2P
-                if (input.startsWith("#FILE ")) {
-                    String[] parts = input.split(" ", 3);
-                    if (parts.length == 3 && parts[1].startsWith("@")) {
-                        String receiver = parts[1].substring(1);
-                        pendingFilePath = parts[2]; // Lưu tạm đường dẫn file chờ gửi
-
-                        // Gửi yêu cầu xin IP lên Server
-                        Message ipReqMsg = new Message(MessageType.GET_IP_REQUEST, myUsername, receiver);
-                        out.writeObject(ipReqMsg);
-                        out.flush();
-                        System.out.println("[Hệ thống] Đang xin IP của " + receiver + " từ Server...");
-                    } else {
-                        System.out.println("[Hệ thống] Sai cú pháp! Mẫu: #FILE @Bob C:\\tailieu.pdf");
-                    }
-                    continue; // Bỏ qua logic text bên dưới để vòng lặp quay lại từ đầu
-                }
-
-                // Cú pháp chat Text thông thường
-                if (input.startsWith("@")) {
-                    int firstSpaceIndex = input.indexOf(" ");
-                    if (firstSpaceIndex > 1) {
-                        String receiver = input.substring(1, firstSpaceIndex);
-                        String content = input.substring(firstSpaceIndex + 1);
-
-                        Message chatMsg = new Message(MessageType.TEXT_MESSAGE, myUsername, receiver);
-                        chatMsg.setContent(content);
-
-                        out.writeObject(chatMsg);
-                        out.flush();
-                    } else {
-                        System.out.println("[Hệ thống] Sai cú pháp! Vui lòng dùng: @TênNgườiNhận Nội_dung");
-                    }
-                } else {
-                    System.out.println("[Hệ thống] Vui lòng thêm @TênNgườiNhận ở đầu câu.");
-                }
-            }
-
-        } catch (IOException e) {
-            System.out.println("Không thể kết nối đến Server! Vui lòng kiểm tra lại IP và Port.");
-        }
+        LoginGUI.main(args);
     }
 
     // =================================================================================
@@ -227,7 +129,7 @@ public class Client {
                     long totalRead = 0;
 
                     // Chỉ đọc đúng kích thước file để tránh kẹt luồng (blocking)
-                    while (totalRead < fileSize && (bytesRead = dis.read(buffer, 0, (int)Math.min(buffer.length, fileSize - totalRead))) > 0) {
+                    while (totalRead < fileSize && (bytesRead = dis.read(buffer, 0, (int) Math.min(buffer.length, fileSize - totalRead))) > 0) {
                         fos.write(buffer, 0, bytesRead);
                         totalRead += bytesRead;
                     }
@@ -237,7 +139,10 @@ public class Client {
             } catch (IOException e) {
                 System.out.println("[P2P] <= Lỗi nhận file: " + e.getMessage());
             } finally {
-                try { socket.close(); } catch (IOException e) {}
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                }
             }
         }).start();
     }

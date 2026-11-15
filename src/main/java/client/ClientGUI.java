@@ -2,6 +2,7 @@ package client;
 
 import model.Message;
 import util.AppConfig;
+import util.ThemeManager;
 import model.MessageType;
 import model.User;
 import util.AudioUtil;
@@ -19,6 +20,9 @@ import java.awt.event.FocusEvent;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.InetSocketAddress;
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
@@ -29,16 +33,25 @@ public class ClientGUI extends JFrame {
     private static final int SERVER_PORT = AppConfig.serverPort();
 
     // Các kênh chat hệ thống đặc biệt
-    public static final String CH_ALL = "📢 Kênh Chung (All - TCP)";
-    public static final String CH_MULTICAST = "🌐 Kênh Multicast (UDP 230.0.0.1:8888)";
-    public static final String CH_BROADCAST = "📡 Kênh Broadcast (UDP Port 9999)";
+    public static final String CH_ALL = "Kênh chung · TCP";
+    public static final String CH_MULTICAST = "Multicast · UDP";
+    public static final String CH_BROADCAST = "Broadcast · UDP";
     public static final String GROUP_PREFIX = "👥 Nhóm: ";
 
-    private ObjectOutputStream out;
-    private ObjectInputStream in;
+    private final ClientConnection connection;
+    private final User account;
+    private volatile boolean active = true;
+    private ServerSocket peerServer;
+    private final java.util.Set<Socket> peerSockets = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ExecutorService network = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "chat-media");
+        t.setDaemon(true);
+        return t;
+    });
     private String myUsername;
     private int myPeerPort;
     private String pendingFilePath = "";
+    private String pendingFileReceiver;
 
     // Handlers UDP
     private MulticastHandler multicastHandler;
@@ -56,28 +69,28 @@ public class ClientGUI extends JFrame {
     private final List<String> currentOnlineUsers = new ArrayList<>();
 
     // Thành phần UI
-    private JTextPane chatPane;
-    private HTMLEditorKit htmlKit;
-    private JTextField messageField;
+    private ChatTimeline timeline;
+    private JTextArea messageField;
     private JButton btnSendText, btnSendFile, btnConnect, btnVoice, btnVideo, btnEmoji, btnCreateGroup;
-    private JTextField txtUsername, txtServerIp;
+    private JLabel connectionStatus;
     private JLabel lblChatTitle;
+    private String receivedTimestamp;
+    private final Map<String, String> displayNames = new HashMap<>();
     private JPanel chatHeaderPanel;
 
     // Danh sách User online & Nhóm và Bộ nhớ lịch sử chat
     private DefaultListModel<String> listModel;
     private JList<String> userList;
-    private final Map<String, StringBuilder> chatHistories = new HashMap<>();
 
     // --- BỘ MÀU SẮC PREMIUM DARK MODE ---
-    private final Color BG_TOP_BAR = new Color(30, 31, 34);       // Đen sâu cho Header
-    private final Color BG_SIDEBAR = new Color(43, 45, 49);       // Xám đậm cho Danh bạ
-    private final Color BG_CHAT = new Color(49, 51, 56);          // Xám nhạt cho khung Chat
-    private final Color BG_INPUT = new Color(56, 58, 64);         // Màu nền ô nhập chữ
-    private final Color ACCENT_COLOR = new Color(88, 101, 242);   // Xanh Tím Discord/Messenger
-    private final Color HOVER_COLOR = new Color(63, 65, 71);      // Xám sáng khi hover
-    private final Color TEXT_PRIMARY = new Color(242, 243, 245);  // Chữ trắng sáng
-    private final Color TEXT_MUTED = new Color(148, 155, 164);    // Chữ xám mờ
+    private final Color BG_TOP_BAR = ThemeManager.CRUST;       // Đen sâu cho Header
+    private final Color BG_SIDEBAR = ThemeManager.MANTLE;       // Xám đậm cho Danh bạ
+    private final Color BG_CHAT = ThemeManager.BASE;          // Xám nhạt cho khung Chat
+    private final Color BG_INPUT = ThemeManager.SURFACE;         // Màu nền ô nhập chữ
+    private final Color ACCENT_COLOR = ThemeManager.MAUVE;   // Xanh Tím Discord/Messenger
+    private final Color HOVER_COLOR = ThemeManager.SURFACE;      // Xám sáng khi hover
+    private final Color TEXT_PRIMARY = ThemeManager.TEXT;  // Chữ trắng sáng
+    private final Color TEXT_MUTED = ThemeManager.MUTED;    // Chữ xám mờ
 
     // Composite Font chuẩn của Java: hiển thị sắc nét cả Tiếng Việt có dấu và Emoji
     private final Font MAIN_FONT = getCompositeFont(Font.PLAIN, 14);
@@ -90,13 +103,23 @@ public class ClientGUI extends JFrame {
     }
 
     private static Font getCompositeFont(int style, int size) {
-        return new Font(Font.DIALOG, style, size);
+        return new Font("Segoe UI", style, size);
     }
 
-    public ClientGUI() {
+    public ClientGUI(ClientConnection connection, User account) {
+        this.connection = connection;
+        this.account = account;
+        myUsername = account.getUsername();
+        myPeerPort = account.getPeerPort();
         setTitle("Lab 1 Chat - TCP/UDP, Multicast, Broadcast, Group, Audio/Video & P2P");
-        setSize(1100, 750);
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setSize(1100, 720);
+        setMinimumSize(new Dimension(900, 600));
+        setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                shutdown(false);
+            }
+        });
         setLocationRelativeTo(null);
         getContentPane().setBackground(BG_CHAT);
 
@@ -112,32 +135,40 @@ public class ClientGUI extends JFrame {
         // ==========================================
         JPanel topPanel = new JPanel(new BorderLayout());
         topPanel.setBackground(BG_TOP_BAR);
-        topPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(20, 20, 20)));
+        topPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, Color.decode("#11111B")));
 
         JPanel topLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 14, 12));
         topLeft.setOpaque(false);
 
-        txtServerIp = createDarkTextField(AppConfig.serverHost(), 11);
-        txtUsername = createDarkTextField("Alice", 11);
-        btnConnect = createStyledButton("🔌 Kết Nối Server", ACCENT_COLOR, Color.WHITE);
-
-        JLabel lblIp = new JLabel("IP Server:");
-        lblIp.setForeground(TEXT_MUTED);
-        JLabel lblName = new JLabel("Tên hiển thị:");
-        lblName.setForeground(TEXT_MUTED);
-
-        topLeft.add(lblIp);
-        topLeft.add(txtServerIp);
-        topLeft.add(lblName);
-        topLeft.add(txtUsername);
+        JLabel brand = new JLabel("LAB1 Chat");
+        brand.setForeground(ACCENT_COLOR);
+        brand.setFont(BOLD_FONT);
+        connectionStatus = new JLabel("Online");
+        connectionStatus.setForeground(ThemeManager.GREEN);
+        topLeft.add(brand);
+        topLeft.add(connectionStatus);
+        btnConnect = createStyledButton("Đăng xuất", BG_INPUT, TEXT_PRIMARY);
         topLeft.add(btnConnect);
 
         JPanel topRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 14, 12));
         topRight.setOpaque(false);
-        btnCreateGroup = createStyledButton("👥 + Tạo Nhóm Chat", new Color(16, 185, 129), Color.WHITE);
+        btnCreateGroup = createStyledButton("Tạo nhóm", Color.decode("#585B70"), ThemeManager.TEXT);
         btnCreateGroup.setEnabled(false);
         btnCreateGroup.setToolTipText("Tạo phòng chat nhóm với các thành viên đang online");
         topRight.add(btnCreateGroup);
+        JButton info = createStyledButton("Thông tin nhóm", BG_INPUT, TEXT_PRIMARY);
+        info.addActionListener(e -> {
+            String target = userList.getSelectedValue();
+            if (target == null || !groupMembersMap.containsKey(target)) {
+                JOptionPane.showMessageDialog(this, "Chọn nhóm để xem thành viên.");
+                return;
+            }
+            JTextArea members = new JTextArea(String.join("\n", groupMembersMap.get(target)));
+            members.setEditable(false);
+            members.setRows(Math.min(12, groupMembersMap.get(target).size()));
+            JOptionPane.showMessageDialog(this, new JScrollPane(members), target.replace(GROUP_PREFIX, "Nhóm: "), JOptionPane.INFORMATION_MESSAGE);
+        });
+        topRight.add(info);
 
         topPanel.add(topLeft, BorderLayout.WEST);
         topPanel.add(topRight, BorderLayout.EAST);
@@ -157,9 +188,9 @@ public class ClientGUI extends JFrame {
         userList.setCellRenderer(new DarkModeUserRenderer());
 
         JScrollPane userScroll = new JScrollPane(userList);
-        userScroll.setPreferredSize(new Dimension(315, 0));
+        userScroll.setPreferredSize(new Dimension(270, 0));
         userScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
-        userScroll.setBorder(BorderFactory.createMatteBorder(0, 0, 0, 1, new Color(30, 31, 34)));
+        userScroll.setBorder(BorderFactory.createMatteBorder(0, 0, 0, 1, ThemeManager.CRUST));
         userScroll.getVerticalScrollBar().setUnitIncrement(16);
         userScroll.getViewport().setBackground(BG_SIDEBAR);
 
@@ -172,7 +203,7 @@ public class ClientGUI extends JFrame {
         // --- Header của khung chat ---
         chatHeaderPanel = new JPanel(new BorderLayout());
         chatHeaderPanel.setBackground(BG_CHAT);
-        chatHeaderPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(40, 42, 45)));
+        chatHeaderPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, Color.decode("#1E1E2E")));
 
         JPanel headerLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 20, 12));
         headerLeft.setOpaque(false);
@@ -185,25 +216,8 @@ public class ClientGUI extends JFrame {
         chatPanel.add(chatHeaderPanel, BorderLayout.NORTH);
 
         // --- Khung hiển thị tin nhắn HTML (Hỗ trợ click Audio & File) ---
-        chatPane = new JTextPane();
-        chatPane.setEditable(false);
-        chatPane.setContentType("text/html");
-        chatPane.setBackground(BG_CHAT);
-        chatPane.putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, Boolean.TRUE);
-        chatPane.setFont(MAIN_FONT);
-
-        htmlKit = new HTMLEditorKit();
-        chatPane.setEditorKit(htmlKit);
-        resetChatPaneDocument();
-
-        // Lắng nghe sự kiện bấm vào bong bóng Ghi âm hoặc bong bóng File
-        chatPane.addHyperlinkListener(e -> {
-            if (e.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
-                handleBubbleLinkClick(e.getDescription());
-            }
-        });
-
-        JScrollPane chatScroll = new JScrollPane(chatPane);
+        timeline = new ChatTimeline(this::handleBubbleLinkClick);
+        JScrollPane chatScroll = new JScrollPane(timeline);
         chatScroll.setBorder(BorderFactory.createEmptyBorder());
         chatScroll.getViewport().setBackground(BG_CHAT);
         chatScroll.getVerticalScrollBar().setUnitIncrement(16);
@@ -214,30 +228,47 @@ public class ClientGUI extends JFrame {
         bottomChatPanel.setBackground(BG_CHAT);
         bottomChatPanel.setBorder(new EmptyBorder(12, 14, 12, 14));
 
-        messageField = createDarkTextField("Nhập tin nhắn...", 0);
+        messageField = new JTextArea(2, 20) {
+            protected void paintComponent(Graphics g) {
+                super.paintComponent(g);
+                if (getText().isEmpty() && !isFocusOwner()) {
+                    g.setColor(TEXT_MUTED);
+                    g.setFont(getFont());
+                    g.drawString("Nhập tin nhắn…", 12, 24);
+                }
+            }
+        };
+        messageField.setLineWrap(true);
+        messageField.setWrapStyleWord(true);
+        messageField.setFont(MAIN_FONT);
+        messageField.setBackground(BG_INPUT);
+        messageField.setForeground(TEXT_PRIMARY);
+        messageField.setCaretColor(TEXT_PRIMARY);
+        messageField.setBorder(new EmptyBorder(8, 12, 8, 12));
+        messageField.setToolTipText("Enter để gửi · Shift + Enter để xuống dòng");
         messageField.setEnabled(false);
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         buttonPanel.setBackground(BG_CHAT);
 
-        btnEmoji = createStyledButton("😊", BG_INPUT, new Color(250, 204, 21));
+        btnEmoji = createStyledButton("Emoji", BG_INPUT, Color.decode("#FAB387"));
         btnEmoji.setFont(getCompositeFont(Font.PLAIN, 17));
         btnEmoji.setToolTipText("Chọn Icon biểu cảm (32 Emojis)");
         btnEmoji.setEnabled(false);
 
-        btnVoice = createStyledButton("🎙 Thu Âm", BG_INPUT, new Color(248, 113, 113));
+        btnVoice = createStyledButton("Thu âm", BG_INPUT, Color.decode("#F38BA8"));
         btnVoice.setToolTipText("Bấm để bắt đầu thu âm, bấm lần nữa để dừng và gửi");
         btnVoice.setEnabled(false);
 
-        btnVideo = createStyledButton("🎬 Video", BG_INPUT, new Color(192, 132, 252));
+        btnVideo = createStyledButton("Video", BG_INPUT, Color.decode("#CBA6F7"));
         btnVideo.setToolTipText("Gửi tệp video (.mp4/.avi) tới đối tác");
         btnVideo.setEnabled(false);
 
-        btnSendFile = createStyledButton("📎 Đính Kèm", BG_INPUT, TEXT_PRIMARY);
+        btnSendFile = createStyledButton("Đính kèm", BG_INPUT, TEXT_PRIMARY);
         btnSendFile.setToolTipText("Truyền file P2P trực tiếp");
         btnSendFile.setEnabled(false);
 
-        btnSendText = createStyledButton("Gửi ➤", ACCENT_COLOR, Color.WHITE);
+        btnSendText = createStyledButton("Gửi", ACCENT_COLOR, ThemeManager.CRUST);
         btnSendText.setEnabled(false);
 
         buttonPanel.add(btnEmoji);
@@ -246,11 +277,20 @@ public class ClientGUI extends JFrame {
         buttonPanel.add(btnSendFile);
         buttonPanel.add(btnSendText);
 
-        bottomChatPanel.add(messageField, BorderLayout.CENTER);
-        bottomChatPanel.add(buttonPanel, BorderLayout.EAST);
+        bottomChatPanel.add(new JScrollPane(messageField), BorderLayout.CENTER);
+        bottomChatPanel.add(buttonPanel, BorderLayout.SOUTH);
         chatPanel.add(bottomChatPanel, BorderLayout.SOUTH);
 
-        mainPanel.add(userScroll, BorderLayout.WEST);
+        JPanel sidebar = new JPanel(new BorderLayout(0, 12));
+        sidebar.setBackground(BG_SIDEBAR);
+        sidebar.setPreferredSize(new Dimension(270, 0));
+        JLabel profile = new JLabel("<html><b>LAB1 Chat</b><br><br>[" + escapeHtml(myUsername.substring(0, 1).toUpperCase()) + "] " + escapeHtml(account.getDisplayName()) + "<br>@" + escapeHtml(myUsername) + "</html>");
+        profile.setBorder(new EmptyBorder(18, 16, 18, 16));
+        profile.setForeground(TEXT_PRIMARY);
+        sidebar.add(profile, BorderLayout.NORTH);
+        sidebar.add(userScroll, BorderLayout.CENTER);
+        sidebar.add(btnConnect, BorderLayout.SOUTH);
+        mainPanel.add(sidebar, BorderLayout.WEST);
         mainPanel.add(chatPanel, BorderLayout.CENTER);
 
         // ==========================================
@@ -265,10 +305,19 @@ public class ClientGUI extends JFrame {
             }
         });
 
-        btnConnect.addActionListener(e -> connectToServer());
+        btnConnect.addActionListener(e -> {
+            if (JOptionPane.showConfirmDialog(this, "Đăng xuất khỏi LAB1 Chat?", "Đăng xuất", JOptionPane.OK_CANCEL_OPTION) == JOptionPane.OK_OPTION)
+                shutdown(true);
+        });
         btnCreateGroup.addActionListener(e -> showCreateGroupDialog());
         btnSendText.addActionListener(e -> sendTextMessage());
-        messageField.addActionListener(e -> sendTextMessage());
+        messageField.getInputMap().put(KeyStroke.getKeyStroke("ENTER"), "send");
+        messageField.getActionMap().put("send", new AbstractAction() {
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                sendTextMessage();
+            }
+        });
+        messageField.getInputMap().put(KeyStroke.getKeyStroke("shift ENTER"), "insert-break");
         btnSendFile.addActionListener(e -> sendFileAction());
         btnVoice.addActionListener(e -> toggleVoiceRecording());
         btnVideo.addActionListener(e -> sendVideoAction());
@@ -279,28 +328,61 @@ public class ClientGUI extends JFrame {
                 String selectedTarget = userList.getSelectedValue();
                 if (selectedTarget != null) {
                     if (selectedTarget.startsWith(GROUP_PREFIX) && groupMembersMap.containsKey(selectedTarget)) {
-                        lblChatTitle.setText(selectedTarget + "  (" + groupMembersMap.get(selectedTarget).size() + " thành viên)");
+                        lblChatTitle.setText(selectedTarget.replace(GROUP_PREFIX, "Nhóm: ") + "  (" + groupMembersMap.get(selectedTarget).size() + " thành viên · Group)");
                     } else {
-                        lblChatTitle.setText(selectedTarget);
+                        lblChatTitle.setText(selectedTarget.replace(GROUP_PREFIX, "Nhóm: ") + (currentOnlineUsers.contains(selectedTarget) ? " · Riêng / P2P" : ""));
                     }
+                    if (selectedTarget.equals(CH_ALL))
+                        lblChatTitle.setText("Kênh chung · TCP · " + (currentOnlineUsers.size() + 1) + " Online");
+                    if (selectedTarget.equals(CH_MULTICAST)) lblChatTitle.setText("Multicast · UDP 230.0.0.1:8888");
+                    if (selectedTarget.equals(CH_BROADCAST)) lblChatTitle.setText("Broadcast · UDP 9999");
+                    lblChatTitle.setToolTipText(lblChatTitle.getText());
                     lblChatTitle.setForeground(TEXT_PRIMARY);
-                    messageField.setEnabled(true);
-                    btnSendText.setEnabled(true);
-                    btnSendFile.setEnabled(true);
-                    btnVoice.setEnabled(true);
-                    btnVideo.setEnabled(true);
-                    btnEmoji.setEnabled(true);
+                    messageField.setEnabled(active);
+                    btnSendText.setEnabled(active);
+                    btnSendFile.setEnabled(active);
+                    btnVoice.setEnabled(active);
+                    btnVideo.setEnabled(active);
+                    btnEmoji.setEnabled(active);
 
                     resetChatPaneDocument();
-                    if (chatHistories.containsKey(selectedTarget)) {
-                        appendHtmlRaw(chatHistories.get(selectedTarget).toString());
-                    }
+
                 }
             }
         });
 
-        multicastHandler = new MulticastHandler(msg -> SwingUtilities.invokeLater(() -> handleReceivedMessage(msg)));
-        broadcastHandler = new BroadcastHandler(msg -> SwingUtilities.invokeLater(() -> handleReceivedMessage(msg)));
+        multicastHandler = new MulticastHandler(msg -> SwingUtilities.invokeLater(() -> {
+            if (active) handleReceivedMessage(msg);
+        }));
+        broadcastHandler = new BroadcastHandler(msg -> SwingUtilities.invokeLater(() -> {
+            if (active) handleReceivedMessage(msg);
+        }));
+        connection.onMessage(this::handleReceivedMessage);
+        connection.onDisconnect(() -> {
+            if (!active) return;
+            shutdown(true);
+        });
+        network.execute(() -> {
+            if (!active) return;
+            startPeerServer(myPeerPort);
+            for (Runnable start : new Runnable[]{multicastHandler::start, broadcastHandler::start}) {
+                try {
+                    if (active) start.run();
+                } catch (RuntimeException e) {
+                    SwingUtilities.invokeLater(() -> {
+                        if (active)
+                            JOptionPane.showMessageDialog(this, e.getMessage(), "UDP", JOptionPane.WARNING_MESSAGE);
+                    });
+                }
+            }
+            if (!active) {
+                multicastHandler.stop();
+                broadcastHandler.stop();
+            }
+        });
+        btnCreateGroup.setEnabled(true);
+        userList.setSelectedIndex(0);
+        sendTcp(new Message(MessageType.GET_USER_LIST, myUsername, "server"));
     }
 
     // ==========================================
@@ -369,6 +451,7 @@ public class ClientGUI extends JFrame {
     // HỘP THOẠI TẠO NHÓM CHAT
     // ==========================================
     private void showCreateGroupDialog() {
+        if (!active || !connection.isConnected()) return;
         if (currentOnlineUsers.isEmpty()) {
             JOptionPane.showMessageDialog(this, "Hiện chưa có người dùng nào khác đang online để tạo nhóm!");
             return;
@@ -397,9 +480,9 @@ public class ClientGUI extends JFrame {
 
         int res = JOptionPane.showConfirmDialog(this, panel, "Tạo Nhóm Chat Mới", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (res == JOptionPane.OK_OPTION) {
-            String groupName = txtGroupName.getText().trim().replace("|", "-").replace("]", "");
-            if (groupName.isEmpty()) {
-                JOptionPane.showMessageDialog(this, "Tên nhóm không được để trống!");
+            String groupName = txtGroupName.getText().trim().replace("|", "-").replace("]", "").replace(",", "-");
+            if (groupName.isEmpty() || groupName.length() > 100) {
+                JOptionPane.showMessageDialog(this, "Tên nhóm phải có 1–100 ký tự!");
                 return;
             }
 
@@ -417,6 +500,10 @@ public class ClientGUI extends JFrame {
             }
 
             String groupKey = GROUP_PREFIX + groupName;
+            if (groupMembersMap.containsKey(groupKey)) {
+                JOptionPane.showMessageDialog(this, "Tên nhóm đã tồn tại trên Client này.");
+                return;
+            }
             groupMembersMap.put(groupKey, members);
             if (!listModel.contains(groupKey)) {
                 listModel.add(3, groupKey); // Đưa nhóm lên ngay dưới 3 kênh hệ thống
@@ -430,20 +517,14 @@ public class ClientGUI extends JFrame {
             try {
                 String encoded = "[GROUP_CHAT|" + groupName + "|" + String.join(",", members) + "]👋 Chào mọi người, mình vừa tạo nhóm!";
                 Message msg = new Message(MessageType.TEXT_MESSAGE, myUsername, "All", encoded);
-                out.writeObject(msg);
-                out.flush();
-            } catch (IOException ignored) {}
+                sendTcp(msg);
+            } catch (RuntimeException ignored) {
+            }
         }
     }
 
     private void resetChatPaneDocument() {
-        HTMLDocument doc = (HTMLDocument) htmlKit.createDefaultDocument();
-        chatPane.setDocument(doc);
-        chatPane.setText(
-                "<html><body style='background-color:#313338; font-family:\"Segoe UI\", \"Segoe UI Emoji\", sans-serif; margin:12px;'>" +
-                        "<div id='chat-root'></div>" +
-                        "</body></html>"
-        );
+        if (timeline != null) timeline.showChannel(userList.getSelectedValue());
     }
 
     private JTextField createDarkTextField(String text, int columns) {
@@ -451,7 +532,7 @@ public class ClientGUI extends JFrame {
         tf.setFont(MAIN_FONT);
         tf.setBackground(BG_INPUT);
         tf.setForeground(TEXT_PRIMARY);
-        tf.setCaretColor(Color.WHITE);
+        tf.setCaretColor(ThemeManager.TEXT);
         tf.setBorder(new EmptyBorder(8, 12, 8, 12));
         return tf;
     }
@@ -462,8 +543,8 @@ public class ClientGUI extends JFrame {
         btn.setBackground(bg);
         btn.setForeground(fg);
         btn.setFocusPainted(false);
-        btn.setBorderPainted(false);
-        btn.setOpaque(true);
+        btn.setBorderPainted(true);
+        btn.setOpaque(false);
         btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
         btn.setBorder(new EmptyBorder(8, 14, 8, 14));
         return btn;
@@ -492,18 +573,18 @@ public class ClientGUI extends JFrame {
                     Color circleColor = ACCENT_COLOR;
                     String symbol = "?";
 
-                    if (targetName.startsWith("📢")) {
-                        circleColor = new Color(245, 158, 11);
-                        symbol = "📢";
-                    } else if (targetName.startsWith("🌐")) {
-                        circleColor = new Color(14, 165, 233);
-                        symbol = "🌐";
-                    } else if (targetName.startsWith("📡")) {
-                        circleColor = new Color(168, 85, 247);
-                        symbol = "📡";
+                    if (targetName.equals(CH_ALL)) {
+                        circleColor = Color.decode("#FAB387");
+                        symbol = "T";
+                    } else if (targetName.equals(CH_MULTICAST)) {
+                        circleColor = Color.decode("#74C7EC");
+                        symbol = "M";
+                    } else if (targetName.equals(CH_BROADCAST)) {
+                        circleColor = Color.decode("#CBA6F7");
+                        symbol = "B";
                     } else if (targetName.startsWith(GROUP_PREFIX)) {
-                        circleColor = new Color(16, 185, 129);
-                        symbol = "👥";
+                        circleColor = Color.decode("#585B70");
+                        symbol = "G";
                     } else {
                         symbol = targetName.isEmpty() ? "?" : targetName.substring(0, 1).toUpperCase();
                     }
@@ -511,7 +592,7 @@ public class ClientGUI extends JFrame {
                     g2.setColor(circleColor);
                     g2.fillOval(0, 0, 36, 36);
 
-                    g2.setColor(Color.WHITE);
+                    g2.setColor(ThemeManager.TEXT);
                     g2.setFont(getCompositeFont(Font.BOLD, 15));
                     FontMetrics fm = g2.getFontMetrics();
                     int x = (36 - fm.stringWidth(symbol)) / 2;
@@ -532,16 +613,17 @@ public class ClientGUI extends JFrame {
         @Override
         public Component getListCellRendererComponent(JList<? extends String> list, String value, int index, boolean isSelected, boolean cellHasFocus) {
             this.targetName = value != null ? value : "";
-            lblName.setText(this.targetName);
+            lblName.setText(displayNames.getOrDefault(this.targetName, this.targetName).replace(GROUP_PREFIX, "Nhóm: "));
+            setToolTipText(this.targetName);
 
             if (isSelected) {
                 setBackground(HOVER_COLOR);
-                lblName.setForeground(Color.WHITE);
+                lblName.setForeground(ACCENT_COLOR);
             } else {
                 setBackground(BG_SIDEBAR);
-                boolean isSpecialChannel = this.targetName.startsWith("📢")
-                        || this.targetName.startsWith("🌐")
-                        || this.targetName.startsWith("📡")
+                boolean isSpecialChannel = this.targetName.equals(CH_ALL)
+                        || this.targetName.equals(CH_MULTICAST)
+                        || this.targetName.equals(CH_BROADCAST)
                         || this.targetName.startsWith(GROUP_PREFIX);
                 lblName.setForeground(isSpecialChannel ? TEXT_PRIMARY : TEXT_MUTED);
             }
@@ -564,52 +646,12 @@ public class ClientGUI extends JFrame {
                 .replace("\n", "<br>");
     }
 
-    private String buildBubbleHtml(String senderLabel, String rawHtmlContent, BubbleAlign align, String timeStr) {
-        String safeSender = escapeHtml(senderLabel);
-
-        if (align == BubbleAlign.CENTER) {
-            return "<table width='100%' cellspacing='0' cellpadding='4' style='margin-bottom:6px;'>" +
-                    "<tr><td align='center'>" +
-                    "<span style='background-color:#2B2D31; color:#949BA4; font-size:12px; padding:4px 10px;'>" +
-                    rawHtmlContent + " (" + timeStr + ")" +
-                    "</span></td></tr></table>";
-        }
-
-        if (align == BubbleAlign.RIGHT) {
-            // Người gửi: Căn phải, màu xanh Messenger/Discord, kèm thời gian gửi phía dưới
-            return "<table width='100%' cellspacing='0' cellpadding='2' style='margin-bottom:10px;'>" +
-                    "<tr>" +
-                    "<td width='26%'></td>" +
-                    "<td width='74%' align='right'>" +
-                    "<div style='font-size:11px; color:#949BA4; margin-bottom:2px;'>" + safeSender + "</div>" +
-                    "<table cellspacing='0' cellpadding='9' style='background-color:#5865F2; color:#FFFFFF;'>" +
-                    "<tr><td align='left' style='font-size:14px; color:#FFFFFF;'>" + rawHtmlContent + "</td></tr>" +
-                    "</table>" +
-                    "<div style='font-size:10px; color:#949BA4; margin-top:2px;'>✓ Đã gửi • " + timeStr + "</div>" +
-                    "</td>" +
-                    "</tr></table>";
-        } else {
-            // Người nhận: Căn trái, nền xám đậm, kèm thời gian nhận phía dưới
-            return "<table width='100%' cellspacing='0' cellpadding='2' style='margin-bottom:10px;'>" +
-                    "<tr>" +
-                    "<td width='74%' align='left'>" +
-                    "<div style='font-size:11px; color:#B5BAC1; font-weight:bold; margin-bottom:2px;'>" + safeSender + "</div>" +
-                    "<table cellspacing='0' cellpadding='9' style='background-color:#383A40; color:#F2F3F5;'>" +
-                    "<tr><td align='left' style='font-size:14px; color:#F2F3F5;'>" + rawHtmlContent + "</td></tr>" +
-                    "</table>" +
-                    "<div style='font-size:10px; color:#949BA4; margin-top:2px;'>" + timeStr + "</div>" +
-                    "</td>" +
-                    "<td width='26%'></td>" +
-                    "</tr></table>";
-        }
-    }
-
     // Giao diện bong bóng Ghi âm kiểu Messenger (cả 2 bên đều bấm vào nghe được)
     private String createVoiceBubbleHtml(String audioId, int byteLength, BubbleAlign align) {
         int seconds = Math.max(1, byteLength / 32000); // Ước tính thời lượng (16kHz 16-bit mono ~ 32KB/s)
         String durationStr = String.format("0:%02d", seconds);
-        String linkColor = (align == BubbleAlign.RIGHT) ? "#FFFFFF" : "#38BDF8";
-        String subColor = (align == BubbleAlign.RIGHT) ? "#E0E7FF" : "#949BA4";
+        String linkColor = (align == BubbleAlign.RIGHT) ? "#CDD6F4" : "#89B4FA";
+        String subColor = (align == BubbleAlign.RIGHT) ? "#BAC2DE" : "#A6ADC8";
 
         return "<a href='audio:" + audioId + "' style='text-decoration:none; color:" + linkColor + "; font-weight:bold;'>" +
                 "▶ &nbsp;▂▄▆█▇▅▃▂▆█▅▃▂&nbsp; " + durationStr +
@@ -621,8 +663,8 @@ public class ClientGUI extends JFrame {
 
     // Giao diện bong bóng File đính kèm (bấm vào để mở thư mục lưu hoặc tải về)
     private String createFileBubbleHtml(String fileId, String fileName, long fileSizeBytes, String statusHint, BubbleAlign align) {
-        String linkColor = (align == BubbleAlign.RIGHT) ? "#FFFFFF" : "#38BDF8";
-        String subColor = (align == BubbleAlign.RIGHT) ? "#E0E7FF" : "#949BA4";
+        String linkColor = (align == BubbleAlign.RIGHT) ? "#CDD6F4" : "#89B4FA";
+        String subColor = (align == BubbleAlign.RIGHT) ? "#BAC2DE" : "#A6ADC8";
         long sizeKB = Math.max(1, fileSizeBytes / 1024);
 
         return "<a href='file:" + fileId + "' style='text-decoration:none; color:" + linkColor + "; font-weight:bold;'>" +
@@ -633,223 +675,213 @@ public class ClientGUI extends JFrame {
                 "</div>";
     }
 
-    private void appendHtmlRaw(String htmlFragment) {
-        try {
-            HTMLDocument doc = (HTMLDocument) chatPane.getDocument();
-            javax.swing.text.Element root = doc.getElement("chat-root");
-            if (root != null) {
-                doc.insertBeforeEnd(root, htmlFragment);
-            } else {
-                htmlKit.insertHTML(doc, doc.getLength(), htmlFragment, 0, 0, null);
-            }
-            chatPane.setCaretPosition(doc.getLength());
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
     private void saveAndShowBubble(String targetKey, String senderLabel, String plainText, BubbleAlign align) {
         saveAndShowRichBubble(targetKey, senderLabel, escapeHtml(plainText), align);
     }
 
     private void saveAndShowRichBubble(String targetKey, String senderLabel, String rawHtmlContent, BubbleAlign align) {
-        String bubbleHtml = buildBubbleHtml(senderLabel, rawHtmlContent, align, getCurrentTimeStr());
-        chatHistories.putIfAbsent(targetKey, new StringBuilder());
-        chatHistories.get(targetKey).append(bubbleHtml);
-
-        String currentlySelected = userList.getSelectedValue();
-        if (targetKey.equals(currentlySelected)) {
-            appendHtmlRaw(bubbleHtml);
-        }
+        if (!active) return;
+        timeline.append(targetKey, displayNames.getOrDefault(senderLabel, senderLabel), rawHtmlContent,
+                receivedTimestamp == null ? getCurrentTimeStr() : receivedTimestamp, align == BubbleAlign.RIGHT, align == BubbleAlign.CENTER);
     }
 
     // ==========================================
     // LOGIC KẾT NỐI VÀ NHẬN/GỬI TIN NHẮN
     // ==========================================
-    private void connectToServer() {
-        myUsername = txtUsername.getText().trim();
-        String serverIp = txtServerIp.getText().trim();
-
-        if (myUsername.isEmpty() || myUsername.equals("Tên của bạn...") || serverIp.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "Vui lòng nhập IP Server và Tên hiển thị!");
-            return;
+    private void shutdown(boolean returnToLogin) {
+        if (!active) return;
+        active = false;
+        connectionStatus.setText("Disconnected");
+        messageField.setEnabled(false);
+        for (JButton button : new JButton[]{btnSendText, btnSendFile, btnVoice, btnVideo, btnEmoji, btnCreateGroup})
+            button.setEnabled(false);
+        connection.onDisconnect(() -> {
+        });
+        connection.send(new Message(MessageType.LOGOUT, myUsername, "server")).orTimeout(1, java.util.concurrent.TimeUnit.SECONDS).whenComplete((r, e) -> connection.close());
+        network.shutdownNow();
+        multicastHandler.stop();
+        broadcastHandler.stop();
+        if (isRecording) {
+            AudioUtil.stopRecording();
+            isRecording = false;
         }
-
-        btnConnect.setText("Đang kết nối...");
-        btnConnect.setEnabled(false);
-        txtUsername.setEnabled(false);
-        txtServerIp.setEnabled(false);
-
-        new Thread(() -> {
+        try {
+            if (peerServer != null) peerServer.close();
+        } catch (IOException ignored) {
+        }
+        for (Socket peer : peerSockets)
             try {
-                myPeerPort = 9000 + (int) (Math.random() * 1000);
-                startPeerServer(myPeerPort);
-
-                multicastHandler.start();
-                broadcastHandler.start();
-
-                Socket socket = new Socket(serverIp, SERVER_PORT);
-                out = new ObjectOutputStream(socket.getOutputStream());
-                out.flush();
-                in = new ObjectInputStream(socket.getInputStream());
-
-                User myUser = new User(myUsername, socket.getLocalAddress().getHostAddress(), myPeerPort);
-                Message loginMsg = new Message(MessageType.LOGIN, myUsername, "Server");
-                loginMsg.setPayload(myUser);
-                out.writeObject(loginMsg);
-                out.flush();
-
-                SwingUtilities.invokeLater(() -> {
-                    setTitle("Lab 1 Chat - [Online: " + myUsername + "] (P2P Port: " + myPeerPort + ")");
-                    btnConnect.setText("✅ Đã Kết Nối");
-                    btnConnect.setBackground(new Color(35, 165, 89));
-                    btnCreateGroup.setEnabled(true);
-                    userList.setSelectedIndex(0);
-                });
-
-                startReadThread();
-
-            } catch (IOException ex) {
-                SwingUtilities.invokeLater(() -> {
-                    btnConnect.setText("🔌 Kết Nối Server");
-                    btnConnect.setEnabled(true);
-                    txtUsername.setEnabled(true);
-                    txtServerIp.setEnabled(true);
-                    JOptionPane.showMessageDialog(ClientGUI.this,
-                            "Không thể kết nối tới Server TCP: " + serverIp + ":" + SERVER_PORT + "\nLỗi: " + ex.getMessage(),
-                            "Lỗi Kết Nối", JOptionPane.ERROR_MESSAGE);
-                });
+                peer.close();
+            } catch (IOException ignored) {
             }
-        }).start();
+        audioClipsStore.clear();
+        fileLinksStore.clear();
+        timeline.clear();
+        groupMembersMap.clear();
+        dispose();
+        if (returnToLogin) new LoginGUI().setVisible(true);
     }
 
-    private void startReadThread() {
-        new Thread(() -> {
+    private void sendUdp(Message message, boolean multicast) {
+        if (!active || !connection.isConnected()) return;
+        network.execute(() -> {
+            if (!active) return;
             try {
-                while (true) {
-                    Message msg = (Message) in.readObject();
-                    SwingUtilities.invokeLater(() -> handleReceivedMessage(msg));
-                }
-            } catch (Exception e) {
-                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Đã mất kết nối với Server TCP!"));
+                if (multicast) multicastHandler.sendMulticast(message);
+                else broadcastHandler.sendBroadcast(message);
+            } catch (RuntimeException e) {
+                SwingUtilities.invokeLater(() -> {
+                    if (active) JOptionPane.showMessageDialog(this, e.getMessage(), "UDP", JOptionPane.ERROR_MESSAGE);
+                });
             }
-        }).start();
+        });
+    }
+
+    private void sendTcp(Message message) {
+        if (!active || !connection.isConnected()) {
+            SwingUtilities.invokeLater(() -> {
+                if (active) JOptionPane.showMessageDialog(this, "Disconnected. Vui lòng đăng nhập lại.");
+            });
+            return;
+        }
+        if (message.getReceiver() != null && message.getReceiver().startsWith(GROUP_PREFIX))
+            message.setPayload(new LinkedHashSet<>(groupMembersMap.getOrDefault(message.getReceiver(), Collections.emptySet())));
+        connection.send(message).whenComplete((v, e) -> {
+            if (e != null) SwingUtilities.invokeLater(() -> {
+                if (active) JOptionPane.showMessageDialog(this, "Không thể gửi dữ liệu. Kết nối đã mất.");
+            });
+        });
     }
 
     @SuppressWarnings("unchecked")
     private void handleReceivedMessage(Message msg) {
-        if (msg == null) return;
+        if (!active || msg == null) return;
         String sender = msg.getSender();
         if (sender != null && sender.equals(myUsername)) return;
 
-        switch (msg.getType()) {
-            case TEXT_MESSAGE:
-                String content = msg.getContent() != null ? msg.getContent() : "";
-                // Kiểm tra nếu là tin nhắn thuộc Nhóm Chat ([GROUP_CHAT|TênNhóm|tv1,tv2]nội_dung)
-                if (content.startsWith("[GROUP_CHAT|")) {
-                    int endBracket = content.indexOf(']');
-                    if (endBracket > 0) {
-                        String header = content.substring("[GROUP_CHAT|".length(), endBracket);
-                        String realText = content.substring(endBracket + 1);
-                        String[] parts = header.split("\\|", 2);
-                        if (parts.length == 2) {
-                            String groupName = parts[0];
-                            Set<String> members = new LinkedHashSet<>(Arrays.asList(parts[1].split(",")));
-                            if (members.contains(myUsername)) {
-                                String groupKey = GROUP_PREFIX + groupName;
-                                groupMembersMap.put(groupKey, members);
-                                if (!listModel.contains(groupKey)) {
-                                    listModel.add(3, groupKey);
+        receivedTimestamp = msg.getTimestamp();
+        try {
+            switch (msg.getType()) {
+                case ERROR:
+                    pendingFileReceiver = null;
+                    JOptionPane.showMessageDialog(this, msg.getContent(), "Server", JOptionPane.ERROR_MESSAGE);
+                    break;
+                case TEXT_MESSAGE:
+                    String content = msg.getContent() != null ? msg.getContent() : "";
+                    // Kiểm tra nếu là tin nhắn thuộc Nhóm Chat ([GROUP_CHAT|TênNhóm|tv1,tv2]nội_dung)
+                    if (content.startsWith("[GROUP_CHAT|")) {
+                        int endBracket = content.indexOf(']');
+                        if (endBracket > 0) {
+                            String header = content.substring("[GROUP_CHAT|".length(), endBracket);
+                            String realText = content.substring(endBracket + 1);
+                            String[] parts = header.split("\\|", 2);
+                            if (parts.length == 2) {
+                                String groupName = parts[0];
+                                Set<String> members = new LinkedHashSet<>(Arrays.asList(parts[1].split(",")));
+                                if (members.contains(myUsername)) {
+                                    String groupKey = GROUP_PREFIX + groupName;
+                                    groupMembersMap.put(groupKey, members);
+                                    if (!listModel.contains(groupKey)) {
+                                        listModel.add(3, groupKey);
+                                    }
+                                    saveAndShowBubble(groupKey, sender, realText, BubbleAlign.LEFT);
                                 }
-                                saveAndShowBubble(groupKey, sender, realText, BubbleAlign.LEFT);
                             }
                         }
+                    } else if ("All".equalsIgnoreCase(msg.getReceiver())) {
+                        saveAndShowBubble(CH_ALL, sender + " (Chung)", content, BubbleAlign.LEFT);
+                    } else {
+                        saveAndShowBubble(sender, sender, content, BubbleAlign.LEFT);
                     }
-                } else if ("All".equalsIgnoreCase(msg.getReceiver())) {
-                    saveAndShowBubble(CH_ALL, sender + " (Chung)", content, BubbleAlign.LEFT);
-                } else {
-                    saveAndShowBubble(sender, sender, content, BubbleAlign.LEFT);
-                }
-                break;
+                    break;
 
-            case MULTICAST_MESSAGE:
-                saveAndShowBubble(CH_MULTICAST, sender + " [UDP Multicast]", msg.getContent(), BubbleAlign.LEFT);
-                break;
+                case MULTICAST_MESSAGE:
+                    saveAndShowBubble(CH_MULTICAST, sender + " [UDP Multicast]", msg.getContent(), BubbleAlign.LEFT);
+                    break;
 
-            case BROADCAST_MESSAGE:
-                saveAndShowBubble(CH_BROADCAST, sender + " [UDP Broadcast]", msg.getContent(), BubbleAlign.LEFT);
-                break;
+                case BROADCAST_MESSAGE:
+                    saveAndShowBubble(CH_BROADCAST, sender + " [UDP Broadcast]", msg.getContent(), BubbleAlign.LEFT);
+                    break;
 
-            case AUDIO_MESSAGE:
-                byte[] audioData = msg.getFileData();
-                if (audioData != null && audioData.length > 0) {
-                    String audioId = UUID.randomUUID().toString();
-                    audioClipsStore.put(audioId, audioData);
-                    String voiceHtml = createVoiceBubbleHtml(audioId, audioData.length, BubbleAlign.LEFT);
+                case AUDIO_MESSAGE:
+                    byte[] audioData = msg.getFileData();
+                    if (audioData != null && audioData.length > 0) {
+                        String audioId = UUID.randomUUID().toString();
+                        audioClipsStore.put(audioId, audioData);
+                        String voiceHtml = createVoiceBubbleHtml(audioId, audioData.length, BubbleAlign.LEFT);
 
-                    String targetTab = resolveIncomingTargetTab(msg, sender);
-                    saveAndShowRichBubble(targetTab, sender, voiceHtml, BubbleAlign.LEFT);
-                }
-                break;
-
-            case VIDEO_MESSAGE:
-                try {
-                    String vidName = msg.getFileName() != null ? msg.getFileName() : "video.mp4";
-                    File saveVid = new File("Received_Video_" + vidName).getAbsoluteFile();
-                    if (msg.getFileData() != null) {
-                        Files.write(saveVid.toPath(), msg.getFileData());
+                        String targetTab = resolveIncomingTargetTab(msg, sender);
+                        saveAndShowRichBubble(targetTab, sender, voiceHtml, BubbleAlign.LEFT);
                     }
-                    String fileId = UUID.randomUUID().toString();
-                    fileLinksStore.put(fileId, saveVid);
+                    break;
 
-                    String fileHtml = createFileBubbleHtml(
-                            fileId,
-                            saveVid.getName(),
-                            saveVid.length(),
-                            "📥 Đã lưu tại: " + saveVid.getParentFile().getAbsolutePath(),
-                            BubbleAlign.LEFT
-                    );
-                    String targetTab = resolveIncomingTargetTab(msg, sender);
-                    saveAndShowRichBubble(targetTab, sender, fileHtml, BubbleAlign.LEFT);
-                } catch (Exception ex) {
-                    System.err.println("Lỗi lưu video: " + ex.getMessage());
-                }
-                break;
+                case VIDEO_MESSAGE:
+                    network.execute(() -> {
+                        if (!active) return;
+                        try {
+                            String name = msg.getFileName() == null ? "video.mp4" : new File(msg.getFileName()).getName();
+                            File saved = new File("Received_Video_" + UUID.randomUUID() + "_" + name).getAbsoluteFile();
+                            if (msg.getFileData() == null) return;
+                            Files.write(saved.toPath(), msg.getFileData());
+                            SwingUtilities.invokeLater(() -> {
+                                if (!active) return;
+                                String id = UUID.randomUUID().toString();
+                                fileLinksStore.put(id, saved);
+                                timeline.append(resolveIncomingTargetTab(msg, sender), displayNames.getOrDefault(sender, sender),
+                                        createFileBubbleHtml(id, name, saved.length(), "Đã lưu tại: " + saved.getParent(), BubbleAlign.LEFT),
+                                        msg.getTimestamp() == null ? getCurrentTimeStr() : msg.getTimestamp(), false, false);
+                            });
+                        } catch (IOException e) {
+                            SwingUtilities.invokeLater(() -> {
+                                if (active) JOptionPane.showMessageDialog(this, "Không thể lưu tệp nhận.");
+                            });
+                        }
+                    });
+                    break;
 
-            case USER_LIST_RESPONSE:
-                List<User> onlineUsers = (List<User>) msg.getPayload();
-                String currentSelected = userList.getSelectedValue();
+                case USER_LIST_RESPONSE:
+                    List<User> onlineUsers = (List<User>) msg.getPayload();
+                    String currentSelected = userList.getSelectedValue();
 
-                currentOnlineUsers.clear();
-                listModel.clear();
-                listModel.addElement(CH_ALL);
-                listModel.addElement(CH_MULTICAST);
-                listModel.addElement(CH_BROADCAST);
+                    currentOnlineUsers.clear();
+                    displayNames.clear();
+                    for (User online : onlineUsers) displayNames.put(online.getUsername(), online.getDisplayName());
+                    listModel.clear();
+                    listModel.addElement(CH_ALL);
+                    listModel.addElement(CH_MULTICAST);
+                    listModel.addElement(CH_BROADCAST);
 
-                // Giữ lại các nhóm chat đã tham gia
-                for (String groupKey : groupMembersMap.keySet()) {
-                    listModel.addElement(groupKey);
-                }
-
-                for (User u : onlineUsers) {
-                    if (!u.getUsername().equals(myUsername)) {
-                        currentOnlineUsers.add(u.getUsername());
-                        listModel.addElement(u.getUsername());
+                    // Giữ lại các nhóm chat đã tham gia
+                    for (String groupKey : groupMembersMap.keySet()) {
+                        listModel.addElement(groupKey);
                     }
-                }
 
-                if (currentSelected != null && listModel.contains(currentSelected)) {
-                    userList.setSelectedValue(currentSelected, true);
-                } else {
-                    userList.setSelectedValue(CH_ALL, true);
-                }
-                break;
+                    for (User u : onlineUsers) {
+                        if (!u.getUsername().equals(myUsername)) {
+                            currentOnlineUsers.add(u.getUsername());
+                            listModel.addElement(u.getUsername());
+                        }
+                    }
 
-            case GET_IP_RESPONSE:
-                User targetUser = (User) msg.getPayload();
-                saveAndShowBubble(targetUser.getUsername(), "", "⏳ Đang truyền file P2P tới " + targetUser.getUsername() + "...", BubbleAlign.CENTER);
-                sendFileP2P(targetUser.getIpAddress(), targetUser.getPeerPort(), pendingFilePath, targetUser.getUsername());
-                break;
+                    if (currentSelected != null && listModel.contains(currentSelected)) {
+                        userList.setSelectedValue(currentSelected, true);
+                    } else {
+                        userList.setSelectedValue(CH_ALL, true);
+                    }
+                    break;
+
+                case GET_IP_RESPONSE:
+                    User targetUser = (User) msg.getPayload();
+                    if (!targetUser.getUsername().equals(pendingFileReceiver)) break;
+                    String transferPath = pendingFilePath;
+                    pendingFileReceiver = null;
+                    pendingFilePath = "";
+                    saveAndShowBubble(targetUser.getUsername(), "", "⏳ Đang truyền file P2P tới " + targetUser.getUsername() + "...", BubbleAlign.CENTER);
+                    sendFileP2P(targetUser.getIpAddress(), targetUser.getPeerPort(), transferPath, targetUser.getUsername());
+                    break;
+            }
+        } finally {
+            receivedTimestamp = null;
         }
     }
 
@@ -868,6 +900,7 @@ public class ClientGUI extends JFrame {
     }
 
     private void sendTextMessage() {
+        if (!active || !connection.isConnected()) return;
         String content = messageField.getText().trim();
         String selectedTarget = userList.getSelectedValue();
 
@@ -876,19 +909,18 @@ public class ClientGUI extends JFrame {
         if (selectedTarget.equals(CH_ALL)) {
             try {
                 Message chatMsg = new Message(MessageType.TEXT_MESSAGE, myUsername, "All", content);
-                out.writeObject(chatMsg);
-                out.flush();
+                sendTcp(chatMsg);
                 saveAndShowBubble(CH_ALL, "Bạn (Kênh Chung)", content, BubbleAlign.RIGHT);
-            } catch (IOException e) {
+            } catch (RuntimeException e) {
                 saveAndShowBubble(CH_ALL, "", "⚠ Không thể gửi tin nhắn chung.", BubbleAlign.CENTER);
             }
         } else if (selectedTarget.equals(CH_MULTICAST)) {
             Message multiMsg = new Message(MessageType.MULTICAST_MESSAGE, myUsername, "Multicast", content);
-            multicastHandler.sendMulticast(multiMsg);
+            sendUdp(multiMsg, true);
             saveAndShowBubble(CH_MULTICAST, "Bạn [UDP Multicast]", content, BubbleAlign.RIGHT);
         } else if (selectedTarget.equals(CH_BROADCAST)) {
             Message bcastMsg = new Message(MessageType.BROADCAST_MESSAGE, myUsername, "Broadcast", content);
-            broadcastHandler.sendBroadcast(bcastMsg);
+            sendUdp(bcastMsg, false);
             saveAndShowBubble(CH_BROADCAST, "Bạn [UDP Broadcast]", content, BubbleAlign.RIGHT);
         } else if (selectedTarget.startsWith(GROUP_PREFIX)) {
             try {
@@ -896,19 +928,17 @@ public class ClientGUI extends JFrame {
                 Set<String> members = groupMembersMap.getOrDefault(selectedTarget, Collections.singleton(myUsername));
                 String encoded = "[GROUP_CHAT|" + groupName + "|" + String.join(",", members) + "]" + content;
                 Message groupMsg = new Message(MessageType.TEXT_MESSAGE, myUsername, "All", encoded);
-                out.writeObject(groupMsg);
-                out.flush();
+                sendTcp(groupMsg);
                 saveAndShowBubble(selectedTarget, "Bạn", content, BubbleAlign.RIGHT);
-            } catch (IOException e) {
+            } catch (RuntimeException e) {
                 saveAndShowBubble(selectedTarget, "", "⚠ Không thể gửi tin nhắn nhóm.", BubbleAlign.CENTER);
             }
         } else {
             try {
                 Message chatMsg = new Message(MessageType.TEXT_MESSAGE, myUsername, selectedTarget, content);
-                out.writeObject(chatMsg);
-                out.flush();
+                sendTcp(chatMsg);
                 saveAndShowBubble(selectedTarget, "Bạn", content, BubbleAlign.RIGHT);
-            } catch (IOException e) {
+            } catch (RuntimeException e) {
                 saveAndShowBubble(selectedTarget, "", "⚠ Không thể gửi tin nhắn.", BubbleAlign.CENTER);
             }
         }
@@ -928,17 +958,17 @@ public class ClientGUI extends JFrame {
             try {
                 AudioUtil.startRecording();
                 isRecording = true;
-                btnVoice.setText("🔴 Đang Thu (Gửi)");
-                btnVoice.setBackground(new Color(239, 68, 68));
-                btnVoice.setForeground(Color.WHITE);
+                btnVoice.setText("Dừng và gửi");
+                btnVoice.setBackground(Color.decode("#F38BA8"));
+                btnVoice.setForeground(ThemeManager.TEXT);
             } catch (Exception e) {
                 JOptionPane.showMessageDialog(this, "Không thể mở micro: " + e.getMessage());
             }
         } else {
             isRecording = false;
-            btnVoice.setText("🎙 Thu Âm");
+            btnVoice.setText("Thu âm");
             btnVoice.setBackground(BG_INPUT);
-            btnVoice.setForeground(new Color(248, 113, 113));
+            btnVoice.setForeground(Color.decode("#F38BA8"));
 
             byte[] wavBytes = AudioUtil.stopRecording();
             if (wavBytes != null && wavBytes.length > 0) {
@@ -948,6 +978,7 @@ public class ClientGUI extends JFrame {
     }
 
     private void sendAudioMessage(String target, byte[] wavBytes) {
+        if (!active || !connection.isConnected()) return;
         Message audioMsg = new Message(MessageType.AUDIO_MESSAGE, myUsername, target);
         audioMsg.setFileData(wavBytes);
         audioMsg.setFileName("voice_note_" + System.currentTimeMillis() + ".wav");
@@ -960,27 +991,25 @@ public class ClientGUI extends JFrame {
 
         if (target.equals(CH_MULTICAST)) {
             audioMsg.setReceiver("Multicast");
-            multicastHandler.sendMulticast(audioMsg);
+            sendUdp(audioMsg, true);
             saveAndShowRichBubble(target, "Bạn", voiceHtml, BubbleAlign.RIGHT);
         } else if (target.equals(CH_BROADCAST)) {
             audioMsg.setReceiver("Broadcast");
-            broadcastHandler.sendBroadcast(audioMsg);
+            sendUdp(audioMsg, false);
             saveAndShowRichBubble(target, "Bạn", voiceHtml, BubbleAlign.RIGHT);
         } else if (target.equals(CH_ALL)) {
             try {
                 audioMsg.setReceiver("All");
-                out.writeObject(audioMsg);
-                out.flush();
+                sendTcp(audioMsg);
                 saveAndShowRichBubble(target, "Bạn", voiceHtml, BubbleAlign.RIGHT);
-            } catch (IOException e) {
+            } catch (RuntimeException e) {
                 saveAndShowBubble(target, "", "⚠ Không thể gửi âm thanh.", BubbleAlign.CENTER);
             }
         } else {
             try {
-                out.writeObject(audioMsg);
-                out.flush();
+                sendTcp(audioMsg);
                 saveAndShowRichBubble(target, "Bạn", voiceHtml, BubbleAlign.RIGHT);
-            } catch (IOException e) {
+            } catch (RuntimeException e) {
                 saveAndShowBubble(target, "", "⚠ Không thể gửi âm thanh.", BubbleAlign.CENTER);
             }
         }
@@ -988,51 +1017,44 @@ public class ClientGUI extends JFrame {
 
     private void sendVideoAction() {
         String target = userList.getSelectedValue();
-        if (target == null) {
-            JOptionPane.showMessageDialog(this, "Vui lòng chọn người nhận hoặc kênh chat!");
-            return;
-        }
-
-        JFileChooser fileChooser = new JFileChooser();
-        fileChooser.setDialogTitle("Chọn tệp Video để gửi (.mp4, .avi, .mkv)");
-        if (fileChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            File videoFile = fileChooser.getSelectedFile();
+        if (!active || target == null) return;
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Chọn video");
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File file = chooser.getSelectedFile();
+        Set<String> members = new LinkedHashSet<>(groupMembersMap.getOrDefault(target, Collections.emptySet()));
+        network.execute(() -> {
+            if (!active) return;
             try {
-                byte[] videoBytes = Files.readAllBytes(videoFile.toPath());
-                Message videoMsg = new Message(MessageType.VIDEO_MESSAGE, myUsername, target);
-                videoMsg.setFileName(videoFile.getName());
-                videoMsg.setFileSize(videoFile.length());
-                videoMsg.setFileData(videoBytes);
-
+                if (file.length() > 64L * 1024 * 1024) throw new IOException("Video vượt giới hạn 64 MB.");
+                Message m = new Message(MessageType.VIDEO_MESSAGE, myUsername, target);
+                m.setFileName(file.getName());
+                m.setFileSize(file.length());
+                m.setFileData(Files.readAllBytes(file.toPath()));
                 if (target.equals(CH_MULTICAST)) {
-                    videoMsg.setReceiver("Multicast");
-                    multicastHandler.sendMulticast(videoMsg);
+                    m.setReceiver("Multicast");
+                    multicastHandler.sendMulticast(m);
                 } else if (target.equals(CH_BROADCAST)) {
-                    videoMsg.setReceiver("Broadcast");
-                    broadcastHandler.sendBroadcast(videoMsg);
-                } else if (target.equals(CH_ALL)) {
-                    videoMsg.setReceiver("All");
-                    out.writeObject(videoMsg);
-                    out.flush();
+                    m.setReceiver("Broadcast");
+                    broadcastHandler.sendBroadcast(m);
                 } else {
-                    out.writeObject(videoMsg);
-                    out.flush();
+                    if (target.equals(CH_ALL)) m.setReceiver("All");
+                    if (target.startsWith(GROUP_PREFIX)) m.setPayload(members);
+                    connection.send(m).join();
                 }
-
-                String fileId = UUID.randomUUID().toString();
-                fileLinksStore.put(fileId, videoFile);
-                String fileHtml = createFileBubbleHtml(
-                        fileId,
-                        videoFile.getName(),
-                        videoFile.length(),
-                        "🎬 Video gốc tại: " + videoFile.getParentFile().getAbsolutePath(),
-                        BubbleAlign.RIGHT
-                );
-                saveAndShowRichBubble(target, "Bạn", fileHtml, BubbleAlign.RIGHT);
+                SwingUtilities.invokeLater(() -> {
+                    if (!active) return;
+                    String id = UUID.randomUUID().toString();
+                    fileLinksStore.put(id, file);
+                    saveAndShowRichBubble(target, "Bạn", createFileBubbleHtml(id, file.getName(), file.length(), "Video đã gửi", BubbleAlign.RIGHT), BubbleAlign.RIGHT);
+                });
             } catch (Exception e) {
-                JOptionPane.showMessageDialog(this, "Lỗi đọc tệp video: " + e.getMessage());
+                SwingUtilities.invokeLater(() -> {
+                    if (active)
+                        JOptionPane.showMessageDialog(this, "Không thể gửi video. Kiểm tra kích thước và kết nối.");
+                });
             }
-        }
+        });
     }
 
     private void showEmojiPicker() {
@@ -1057,7 +1079,7 @@ public class ClientGUI extends JFrame {
             btn.setFont(emojiItemFont);
             btn.setMargin(new Insets(2, 2, 2, 2));
             btn.setBackground(BG_INPUT);
-            btn.setForeground(Color.WHITE);
+            btn.setForeground(ThemeManager.TEXT);
             btn.setFocusPainted(false);
             btn.setBorderPainted(false);
             btn.setCursor(new Cursor(Cursor.HAND_CURSOR));
@@ -1077,8 +1099,13 @@ public class ClientGUI extends JFrame {
     }
 
     private void sendFileAction() {
+        if (!active || !connection.isConnected()) return;
+        if (pendingFileReceiver != null) {
+            JOptionPane.showMessageDialog(this, "Đang chờ thông tin người nhận tệp.");
+            return;
+        }
         String receiver = userList.getSelectedValue();
-        if (receiver == null || receiver.startsWith("📢") || receiver.startsWith("🌐") || receiver.startsWith("📡") || receiver.startsWith(GROUP_PREFIX)) {
+        if (receiver == null || receiver.equals(CH_ALL) || receiver.equals(CH_MULTICAST) || receiver.equals(CH_BROADCAST) || receiver.startsWith(GROUP_PREFIX)) {
             JOptionPane.showMessageDialog(this, "Vui lòng chọn một người dùng cụ thể trong danh bạ để truyền file P2P!");
             return;
         }
@@ -1087,12 +1114,12 @@ public class ClientGUI extends JFrame {
         if (fileChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
             File selectedFile = fileChooser.getSelectedFile();
             pendingFilePath = selectedFile.getAbsolutePath();
+            pendingFileReceiver = receiver;
 
             try {
                 Message ipReqMsg = new Message(MessageType.GET_IP_REQUEST, myUsername, receiver);
-                out.writeObject(ipReqMsg);
-                out.flush();
-            } catch (IOException e) {
+                sendTcp(ipReqMsg);
+            } catch (RuntimeException e) {
                 saveAndShowBubble(receiver, "", "⚠ Không thể yêu cầu truyền file.", BubbleAlign.CENTER);
             }
         }
@@ -1101,12 +1128,21 @@ public class ClientGUI extends JFrame {
     private void startPeerServer(int peerPort) {
         Thread p2pServerThread = new Thread(() -> {
             try (ServerSocket serverSocket = new ServerSocket(peerPort)) {
+                peerServer = serverSocket;
+                if (!active) return;
                 System.out.println("[P2P] Đang lắng nghe nhận file tại cổng: " + peerPort);
-                while (true) {
+                while (active) {
                     Socket senderSocket = serverSocket.accept();
+                    peerSockets.add(senderSocket);
+                    if (!active) {
+                        senderSocket.close();
+                        break;
+                    }
                     receiveFileP2P(senderSocket);
                 }
             } catch (IOException e) {
+                if (active)
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Không mở được cổng P2P. File vẫn có thể gửi qua relay."));
                 System.err.println("[P2P] Lỗi mở cổng nhận file " + peerPort + ": " + e.getMessage());
             }
         });
@@ -1115,6 +1151,7 @@ public class ClientGUI extends JFrame {
     }
 
     private void sendFileP2P(String ip, int port, String filePath, String receiverName) {
+        if (!active) return;
         new Thread(() -> {
             File file = new File(filePath);
             if (!file.exists()) {
@@ -1126,7 +1163,10 @@ public class ClientGUI extends JFrame {
             long fileSize = file.length();
 
             // Thử kết nối P2P trực tiếp với timeout 2.5 giây
-            try (Socket socket = new Socket()) {
+            Socket transferSocket = new Socket();
+            try (Socket socket = transferSocket) {
+                peerSockets.add(socket);
+                if (!active) return;
                 socket.connect(new java.net.InetSocketAddress(ip, port), 2500);
                 try (DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
                      FileInputStream fis = new FileInputStream(file)) {
@@ -1151,10 +1191,11 @@ public class ClientGUI extends JFrame {
                         if (pm.isCanceled()) break;
                     }
                     dos.flush();
-                    pm.close();
+                    SwingUtilities.invokeLater(pm::close);
 
                     if (totalSent == fileSize) {
                         SwingUtilities.invokeLater(() -> {
+                            if (!active) return;
                             String fileId = UUID.randomUUID().toString();
                             fileLinksStore.put(fileId, file);
                             String fileHtml = createFileBubbleHtml(
@@ -1169,24 +1210,24 @@ public class ClientGUI extends JFrame {
                     }
                 }
             } catch (IOException p2pEx) {
+                if (!active) return;
                 // Nếu mạng Wi-Fi/Firewall chặn P2P -> Tự động chuyển sang gửi qua Server trung tâm (Relay)
                 SwingUtilities.invokeLater(() ->
                         saveAndShowBubble(receiverName, "", "🔄 P2P tới " + ip + ":" + port + " bị chặn (" + p2pEx.getMessage() + "), đang gửi qua Server...", BubbleAlign.CENTER)
                 );
                 try {
+                    if (fileSize > 64L * 1024 * 1024)
+                        throw new IOException("Relay hỗ trợ tệp tối đa 64 MB. Hãy kiểm tra kết nối P2P.");
                     byte[] fileBytes = Files.readAllBytes(file.toPath());
                     Message relayFileMsg = new Message(MessageType.VIDEO_MESSAGE, myUsername, receiverName);
                     relayFileMsg.setFileName(file.getName());
                     relayFileMsg.setFileSize(fileSize);
                     relayFileMsg.setFileData(fileBytes);
 
-                    synchronized (out) {
-                        out.writeObject(relayFileMsg);
-                        out.flush();
-                        out.reset();
-                    }
+                    connection.send(relayFileMsg).join();
 
                     SwingUtilities.invokeLater(() -> {
+                        if (!active) return;
                         String fileId = UUID.randomUUID().toString();
                         fileLinksStore.put(fileId, file);
                         String fileHtml = createFileBubbleHtml(
@@ -1203,6 +1244,8 @@ public class ClientGUI extends JFrame {
                             saveAndShowBubble(receiverName, "", "⚠ Gửi file thất bại: " + relayEx.getMessage(), BubbleAlign.CENTER)
                     );
                 }
+            } finally {
+                peerSockets.remove(transferSocket);
             }
         }).start();
     }
@@ -1211,11 +1254,15 @@ public class ClientGUI extends JFrame {
         new Thread(() -> {
             try (DataInputStream dis = new DataInputStream(socket.getInputStream())) {
 
+                socket.setSoTimeout(10000);
+                if (!active) return;
                 String senderName = dis.readUTF();
-                String fileName = dis.readUTF();
+                String fileName = new File(dis.readUTF()).getName();
+                if (fileName.isBlank()) throw new IOException("Tên tệp không hợp lệ.");
                 long fileSize = dis.readLong();
 
-                File saveFile = new File("Received_" + fileName).getAbsoluteFile();
+                if (fileSize < 0) throw new IOException("Kích thước tệp không hợp lệ.");
+                File saveFile = new File("Received_" + UUID.randomUUID() + "_" + fileName).getAbsoluteFile();
 
                 ProgressMonitor pm = new ProgressMonitor(ClientGUI.this, "Đang nhận file từ " + senderName, fileName, 0, 100);
                 pm.setMillisToDecideToPopup(0);
@@ -1233,11 +1280,12 @@ public class ClientGUI extends JFrame {
                         SwingUtilities.invokeLater(() -> pm.setProgress(percent));
                         if (pm.isCanceled()) break;
                     }
-                    pm.close();
+                    SwingUtilities.invokeLater(pm::close);
 
                     if (totalRead == fileSize) {
                         SwingUtilities.invokeLater(() -> {
                             String fileId = UUID.randomUUID().toString();
+                            if (!active) return;
                             fileLinksStore.put(fileId, saveFile);
                             String fileHtml = createFileBubbleHtml(
                                     fileId,
@@ -1249,19 +1297,24 @@ public class ClientGUI extends JFrame {
                             saveAndShowRichBubble(senderName, senderName, fileHtml, BubbleAlign.LEFT);
                         });
                     }
+                    if (totalRead != fileSize && !pm.isCanceled()) throw new EOFException("Tệp nhận chưa đầy đủ.");
                 }
 
-            } catch (IOException ignored) {}
+            } catch (IOException e) {
+                SwingUtilities.invokeLater(() -> {
+                    if (active) JOptionPane.showMessageDialog(this, "Nhận tệp P2P bị gián đoạn hoặc không hợp lệ.");
+                });
+            } finally {
+                peerSockets.remove(socket);
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                }
+            }
         }).start();
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> {
-            ClientGUI gui = new ClientGUI();
-            if (args != null && args.length > 0 && !args[0].trim().isEmpty()) {
-                gui.txtUsername.setText(args[0].trim());
-            }
-            gui.setVisible(true);
-        });
+        LoginGUI.main(args);
     }
 }

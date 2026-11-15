@@ -1,21 +1,29 @@
-# Cấu hình kết nối
+# Cấu hình LAB1 Chat
 
-Sửa file `app.properties` ở thư mục gốc dự án:
+Java 21, Swing. Cấu hình UTF-8 tập trung tại app.properties ở thư mục gốc.
 
-| Thuộc tính | Ý nghĩa |
+| Thuộc tính | Giá trị / ý nghĩa |
 | --- | --- |
-| `server.host` | IP hoặc hostname của máy chạy chat server; dùng IP LAN nếu client ở máy khác. |
-| `server.port` | Cổng TCP của chat server, phải giống nhau trên server và các client. |
-| `db.url` | Địa chỉ MySQL, cổng, tên database và các tùy chọn JDBC. |
-| `db.username` | Tài khoản MySQL. |
-| `db.password` | Mật khẩu MySQL; có thể để trống sau dấu `=`. |
+| server.host | 172.20.10.4 — đích của Client |
+| server.bind | 0.0.0.0 — địa chỉ Server bind |
+| server.port | 8000 — TCP |
+| db.url | MySQL ltm_chat, chỉ Server sử dụng |
+| db.username | Tài khoản MySQL của Server |
+| db.password | Mật khẩu MySQL, không phải mật khẩu tài khoản chat |
 
-Khởi động lại chương trình sau khi sửa; không cần biên dịch lại. Client GUI lấy IP mặc định từ file và vẫn cho phép nhập IP khác trên giao diện. Client dòng lệnh cũng sử dụng file này. Chat server lắng nghe trên mọi địa chỉ mạng ở cổng đã cấu hình; `server.host` là địa chỉ để client kết nối.
+Client tự kết nối, không có ô nhập IP/tên hiển thị. Offline có Retry.
+Sau mất kết nối phải đăng nhập lại. Không fallback localhost hoặc tự chạy Server.
 
-Chạy từ thư mục gốc dự án bằng các file `.bat` hiện có hoặc đặt Working directory của IntelliJ thành thư mục gốc dự án. Nếu chạy từ thư mục khác, thêm VM option để chỉ rõ file cấu hình:
-
-```text
+Đặt Working directory trong IntelliJ là thư mục gốc dự án. Nếu khác, chỉ định VM option:
 -Dchat.config=C:/Users/qank0/IdeaProjects/LAB1_Chat/app.properties
-```
 
-File sử dụng UTF-8. Với mật khẩu chứa dấu gạch chéo ngược, viết `\\` để biểu diễn một ký tự `\` theo cú pháp Java properties. Thông tin database chỉ được server sử dụng; client không gửi tài khoản hay mật khẩu database qua mạng.
+File dùng cú pháp Java properties: dấu gạch chéo ngược trong giá trị cần escape.
+Client không mở MySQL; có thể để trống db.password trong bản cấu hình trên Client.
+
+Entry point Server: server.Server.
+Entry point Client: client.LoginGUI; client.ClientGUI và client.Client cũng mở Login.
+Không có script .bat trong source hiện tại.
+
+Database mới: SETUP_DATABASE.sql.
+Database cũ: sao lưu rồi chạy MIGRATION_AUTH.sql; giữ tài khoản/lịch sử.
+Hướng dẫn LAN, danh sách file và checklist: UPGRADE_NOTES.md.
